@@ -1,0 +1,9 @@
+[
+  {
+    "user_id": "rick",
+    "amount": 5.0,
+    "date": "2025-11-09T14:41:09.895903",
+    "method": "Venmo",
+    "status": "Paid"
+  }
+]

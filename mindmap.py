@@ -737,18 +737,248 @@
 #     st.dataframe(pd.DataFrame(edges))
 
 #### add del edge
+
+
+# import streamlit as st
+# import graphviz
+# import sqlite3
+# import pandas as pd
+# import os
+
+# # ---------- DATABASE SETUP ----------
+# DB_PATH = "mindmap.db"
+
+# def init_db():
+#     """Create tables if they don’t exist."""
+#     conn = sqlite3.connect(DB_PATH)
+#     c = conn.cursor()
+#     c.execute("""
+#         CREATE TABLE IF NOT EXISTS nodes (
+#             id INTEGER PRIMARY KEY AUTOINCREMENT,
+#             label TEXT,
+#             priority TEXT
+#         )
+#     """)
+#     c.execute("""
+#         CREATE TABLE IF NOT EXISTS edges (
+#             id INTEGER PRIMARY KEY AUTOINCREMENT,
+#             source INTEGER,
+#             target INTEGER
+#         )
+#     """)
+#     conn.commit()
+#     conn.close()
+
+# def get_nodes():
+#     conn = sqlite3.connect(DB_PATH)
+#     df = pd.read_sql("SELECT * FROM nodes", conn)
+#     conn.close()
+#     return df.to_dict(orient="records")
+
+# def get_edges():
+#     conn = sqlite3.connect(DB_PATH)
+#     df = pd.read_sql("SELECT * FROM edges", conn)
+#     conn.close()
+#     return df.to_dict(orient="records")
+
+# def add_node(label, priority):
+#     conn = sqlite3.connect(DB_PATH)
+#     c = conn.cursor()
+#     c.execute("INSERT INTO nodes (label, priority) VALUES (?, ?)", (label, priority))
+#     conn.commit()
+#     conn.close()
+
+# def add_edge(source, target):
+#     conn = sqlite3.connect(DB_PATH)
+#     c = conn.cursor()
+#     c.execute("INSERT INTO edges (source, target) VALUES (?, ?)", (source, target))
+#     conn.commit()
+#     conn.close()
+
+# def delete_edge(source, target):
+#     """Delete a specific edge from source → target."""
+#     conn = sqlite3.connect(DB_PATH)
+#     c = conn.cursor()
+#     c.execute("DELETE FROM edges WHERE source=? AND target=?", (source, target))
+#     conn.commit()
+#     conn.close()
+
+# def update_node_label(node_id, new_label):
+#     """Update node label by ID."""
+#     conn = sqlite3.connect(DB_PATH)
+#     c = conn.cursor()
+#     c.execute("UPDATE nodes SET label=? WHERE id=?", (new_label, node_id))
+#     conn.commit()
+#     conn.close()
+
+# def delete_all():
+#     conn = sqlite3.connect(DB_PATH)
+#     c = conn.cursor()
+#     c.execute("DELETE FROM nodes")
+#     c.execute("DELETE FROM edges")
+#     conn.commit()
+#     conn.close()
+
+# # ---------- GRAPH CREATION ----------
+# def create_mindmap_graph(nodes, edges):
+#     """Render Graphviz mind map with top-to-bottom arrows."""
+#     dot = graphviz.Digraph(format="svg")
+#     dot.attr(rankdir='TB', bgcolor='transparent')  # Top-to-Bottom flow
+
+#     dot.attr('node', shape='box', style='filled,rounded',
+#              color='#555555', fillcolor='#f8f9fa',
+#              fontname='Helvetica', fontsize='12')
+
+#     for node in nodes:
+#         label = node.get("label", "")
+#         priority = node.get("priority", "")
+#         node_label = f"{label}\n({priority})" if priority else label
+#         dot.node(str(node["id"]), node_label)
+
+#     for edge in edges:
+#         dot.edge(str(edge["source"]), str(edge["target"]),
+#                  arrowhead='normal', color='#999999')
+
+#     return dot
+
+
+# # ---------- STREAMLIT APP ----------
+# st.set_page_config(page_title="Mind Map (SQLite)", layout="wide")
+
+# st.title("🧠 Downward Flow Mind Map (with Database)")
+# st.markdown("Create and visualize a mind map with arrows flowing **top → bottom**, saved in **SQLite**.")
+
+# # Initialize database
+# init_db()
+
+# # Sidebar controls
+# st.sidebar.header("🧩 Add or Edit Mind Map Elements")
+
+# # ---------- Add Node ----------
+# st.sidebar.subheader("Add Node")
+# new_label = st.sidebar.text_input("Label")
+# new_priority = st.sidebar.selectbox("Priority", ["", "High", "Medium", "Low"])
+# if st.sidebar.button("Add Node"):
+#     if new_label:
+#         add_node(new_label, new_priority)
+#         st.success(f"✅ Added node: {new_label}")
+#     else:
+#         st.warning("Please enter a label before adding a node.")
+
+# # ---------- Edit Node ----------
+# nodes_list = get_nodes()
+# if nodes_list:
+#     st.sidebar.subheader("Edit Node Label")
+#     node_options = {n["label"]: n["id"] for n in nodes_list}
+#     selected_label = st.sidebar.selectbox("Select Node", list(node_options.keys()), key="edit_node")
+#     new_label_text = st.sidebar.text_input("New Label", value=selected_label, key="edit_label_input")
+
+#     if st.sidebar.button("✏️ Update Label"):
+#         node_id = node_options[selected_label]
+#         if new_label_text.strip():
+#             update_node_label(node_id, new_label_text.strip())
+#             st.success(f"✅ Updated node label: '{selected_label}' → '{new_label_text.strip()}'")
+#         else:
+#             st.warning("Label cannot be empty.")
+
+# # ---------- Add Edge ----------
+# if nodes_list:
+#     st.sidebar.subheader("Add Edge")
+#     node_options = {n["label"]: n["id"] for n in nodes_list}
+#     source_label = st.sidebar.selectbox("Source", list(node_options.keys()), key="add_source")
+#     target_label = st.sidebar.selectbox("Target", list(node_options.keys()), key="add_target")
+#     if st.sidebar.button("Add Edge"):
+#         source_id = node_options[source_label]
+#         target_id = node_options[target_label]
+#         if source_id != target_id:
+#             add_edge(source_id, target_id)
+#             st.success(f"✅ Added edge: {source_label} → {target_label}")
+#         else:
+#             st.warning("Cannot connect a node to itself.")
+
+# # ---------- Delete Edge ----------
+# edges_list = get_edges()
+# if edges_list:
+#     st.sidebar.subheader("Delete Edge")
+#     id_to_label = {n["id"]: n["label"] for n in nodes_list}
+#     edge_labels = {
+#         f"{id_to_label.get(e['source'], '?')} → {id_to_label.get(e['target'], '?')}": (e['source'], e['target'])
+#         for e in edges_list
+#     }
+
+#     selected_edge_label = st.sidebar.selectbox("Select Edge to Delete", list(edge_labels.keys()))
+#     if st.sidebar.button("❌ Delete Edge"):
+#         source, target = edge_labels[selected_edge_label]
+#         delete_edge(source, target)
+#         st.warning(f"🗑️ Deleted edge: {selected_edge_label}")
+
+# # ---------- Delete All ----------
+# if st.sidebar.button("🗑️ Clear All Data"):
+#     delete_all()
+#     st.warning("All nodes and edges deleted.")
+
+# # ---------- Load Data ----------
+# nodes = get_nodes()
+# edges = get_edges()
+
+# # ---------- Display Mind Map ----------
+# st.subheader("📊 Mind Map Visualization")
+# if nodes:
+#     graph = create_mindmap_graph(nodes, edges)
+#     st.graphviz_chart(graph.source, use_container_width=True)
+# else:
+#     st.info("No nodes found. Add one from the sidebar to begin!")
+
+# # ---------- View Tables ----------
+# with st.expander("🧾 View Data Tables"):
+#     st.write("### Nodes")
+#     st.dataframe(pd.DataFrame(nodes))
+#     st.write("### Edges")
+#     st.dataframe(pd.DataFrame(edges))
+
+
+###### add database to create
+#### flowchart https://grok.com/share/bGVnYWN5LWNvcHk%3D_2d8c9e1d-6c13-4532-85e3-c0379469878c 
+
 import streamlit as st
 import graphviz
 import sqlite3
 import pandas as pd
 import os
 
-# ---------- DATABASE SETUP ----------
-DB_PATH = "mindmap.db"
+# ---------- STREAMLIT APP ----------
+st.set_page_config(page_title="Mind Map (SQLite)", layout="wide")
+st.title("🧠 Downward Flow Mind Map (with Database)")
+st.markdown("Create and visualize a mind map with arrows flowing **top → bottom**, saved in **SQLite**.")
 
+# ---------- DATABASE FILE SELECTION ----------
+st.sidebar.header("🗄️ Database Management")
+
+# Initialize DB_PATH in session_state
+if "DB_PATH" not in st.session_state:
+    st.session_state.DB_PATH = "mindmap.db"  # default
+
+# List existing .db files
+db_files = [f for f in os.listdir() if f.endswith(".db")]
+db_files.append("Create New Database")
+
+selected_db = st.sidebar.selectbox("Select Database", db_files, index=0)
+
+if selected_db == "Create New Database":
+    new_db_name = st.sidebar.text_input("New Database Name", value="my_mindmap.db")
+    if st.sidebar.button("✅ Create Database"):
+        st.session_state.DB_PATH = new_db_name
+        if not os.path.exists(st.session_state.DB_PATH):
+            open(st.session_state.DB_PATH, "w").close()
+        st.success(f"Database '{st.session_state.DB_PATH}' created and selected.")
+else:
+    st.session_state.DB_PATH = selected_db
+    st.info(f"Using database: {st.session_state.DB_PATH}")
+
+# ---------- DATABASE FUNCTIONS ----------
 def init_db():
     """Create tables if they don’t exist."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(st.session_state.DB_PATH)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS nodes (
@@ -768,61 +998,60 @@ def init_db():
     conn.close()
 
 def get_nodes():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(st.session_state.DB_PATH)
     df = pd.read_sql("SELECT * FROM nodes", conn)
     conn.close()
     return df.to_dict(orient="records")
 
 def get_edges():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(st.session_state.DB_PATH)
     df = pd.read_sql("SELECT * FROM edges", conn)
     conn.close()
     return df.to_dict(orient="records")
 
 def add_node(label, priority):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(st.session_state.DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO nodes (label, priority) VALUES (?, ?)", (label, priority))
     conn.commit()
     conn.close()
 
 def add_edge(source, target):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(st.session_state.DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO edges (source, target) VALUES (?, ?)", (source, target))
     conn.commit()
     conn.close()
 
 def delete_edge(source, target):
-    """Delete a specific edge from source → target."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(st.session_state.DB_PATH)
     c = conn.cursor()
     c.execute("DELETE FROM edges WHERE source=? AND target=?", (source, target))
     conn.commit()
     conn.close()
 
 def update_node_label(node_id, new_label):
-    """Update node label by ID."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(st.session_state.DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE nodes SET label=? WHERE id=?", (new_label, node_id))
     conn.commit()
     conn.close()
 
 def delete_all():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(st.session_state.DB_PATH)
     c = conn.cursor()
     c.execute("DELETE FROM nodes")
     c.execute("DELETE FROM edges")
     conn.commit()
     conn.close()
 
+# Initialize database after selection
+init_db()
+
 # ---------- GRAPH CREATION ----------
 def create_mindmap_graph(nodes, edges):
-    """Render Graphviz mind map with top-to-bottom arrows."""
     dot = graphviz.Digraph(format="svg")
-    dot.attr(rankdir='TB', bgcolor='transparent')  # Top-to-Bottom flow
-
+    dot.attr(rankdir='TB', bgcolor='transparent')
     dot.attr('node', shape='box', style='filled,rounded',
              color='#555555', fillcolor='#f8f9fa',
              fontname='Helvetica', fontsize='12')
@@ -839,20 +1068,10 @@ def create_mindmap_graph(nodes, edges):
 
     return dot
 
-
-# ---------- STREAMLIT APP ----------
-st.set_page_config(page_title="Mind Map (SQLite)", layout="wide")
-
-st.title("🧠 Downward Flow Mind Map (with Database)")
-st.markdown("Create and visualize a mind map with arrows flowing **top → bottom**, saved in **SQLite**.")
-
-# Initialize database
-init_db()
-
-# Sidebar controls
+# ---------- SIDEBAR: Mind Map Controls ----------
 st.sidebar.header("🧩 Add or Edit Mind Map Elements")
 
-# ---------- Add Node ----------
+# Add Node
 st.sidebar.subheader("Add Node")
 new_label = st.sidebar.text_input("Label")
 new_priority = st.sidebar.selectbox("Priority", ["", "High", "Medium", "Low"])
@@ -863,14 +1082,13 @@ if st.sidebar.button("Add Node"):
     else:
         st.warning("Please enter a label before adding a node.")
 
-# ---------- Edit Node ----------
+# Edit Node
 nodes_list = get_nodes()
 if nodes_list:
     st.sidebar.subheader("Edit Node Label")
     node_options = {n["label"]: n["id"] for n in nodes_list}
     selected_label = st.sidebar.selectbox("Select Node", list(node_options.keys()), key="edit_node")
     new_label_text = st.sidebar.text_input("New Label", value=selected_label, key="edit_label_input")
-
     if st.sidebar.button("✏️ Update Label"):
         node_id = node_options[selected_label]
         if new_label_text.strip():
@@ -879,7 +1097,7 @@ if nodes_list:
         else:
             st.warning("Label cannot be empty.")
 
-# ---------- Add Edge ----------
+# Add Edge
 if nodes_list:
     st.sidebar.subheader("Add Edge")
     node_options = {n["label"]: n["id"] for n in nodes_list}
@@ -894,7 +1112,7 @@ if nodes_list:
         else:
             st.warning("Cannot connect a node to itself.")
 
-# ---------- Delete Edge ----------
+# Delete Edge
 edges_list = get_edges()
 if edges_list:
     st.sidebar.subheader("Delete Edge")
@@ -903,14 +1121,13 @@ if edges_list:
         f"{id_to_label.get(e['source'], '?')} → {id_to_label.get(e['target'], '?')}": (e['source'], e['target'])
         for e in edges_list
     }
-
     selected_edge_label = st.sidebar.selectbox("Select Edge to Delete", list(edge_labels.keys()))
     if st.sidebar.button("❌ Delete Edge"):
         source, target = edge_labels[selected_edge_label]
         delete_edge(source, target)
         st.warning(f"🗑️ Deleted edge: {selected_edge_label}")
 
-# ---------- Delete All ----------
+# Delete All
 if st.sidebar.button("🗑️ Clear All Data"):
     delete_all()
     st.warning("All nodes and edges deleted.")
@@ -927,15 +1144,12 @@ if nodes:
 else:
     st.info("No nodes found. Add one from the sidebar to begin!")
 
-# ---------- View Tables ----------
+# View Tables
 with st.expander("🧾 View Data Tables"):
     st.write("### Nodes")
     st.dataframe(pd.DataFrame(nodes))
     st.write("### Edges")
     st.dataframe(pd.DataFrame(edges))
-
-
-
 
 
 ##### interactive arrow pointing down

@@ -1,0 +1,13 @@
+{
+  "rick": {
+    "reputation": 1000.0,
+    "last_active": "2025-11-09T14:24:42.987798",
+    "predictions": 0,
+    "avg_brier": 0.0,
+    "fake_balance": 10000.0,
+    "pred_streak": 0,
+    "last_pred_win": false,
+    "badges": [],
+    "x_api_key": ""
+  }
+}
