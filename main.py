@@ -13677,7 +13677,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from scipy.stats import norm
-
+import scipy
 
 # -------------------------------------------------
 # UTILITY: CLEAN IV COLUMNS
