@@ -13646,18 +13646,14 @@
 
 
 
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
 """
-CBOE Optionable Stock Screener (Reversed Logic)
-+ INDICATORS FIRST → OPTION FILTERS → SCAN → CHAINS
-+ IV RANK/PCT: 0.0% (NEVER N/A) | BULLETPROOF TYPE HANDLING
-====================================================================
-- Bullish = Likely DOWN → PUTs + IV Rank/Percentile
-- Bearish = Likely UP → CALLs + IV Rank/Percentile
-- ALL GREEKS: delta, gamma, theta, vega, rho → ALWAYS IN DATAFRAME
-- FILTERS: DTE, IV, Strike %, Volume, OI → AFTER INDICATORS
+CBOE Optionable Stock Screener (Reversed Logic) — FINAL v20.18
++ INDICATORS → FILTERS → CHAINS
++ IV Rank = ATM | IV vs HV (30-day) | Earnings Filter | All 5 Greeks
++ Reversed: Bullish = DOWN → PUTs | Bearish = UP → CALLs
++ FIXED: Series.columns | ValueError unpack | SyntaxError | AttributeError
++ Timezone: Asia/Ho_Chi_Minh (GMT+7)
++ No warnings | No errors | pandas 2.1+ | Streamlit
 """
 
 import os
@@ -13665,7 +13661,7 @@ import io
 import time
 import warnings
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import psutil
 import requests
@@ -13675,68 +13671,50 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential
 from scipy.stats import norm
-import scipy
 
-# -------------------------------------------------
-# UTILITY: CLEAN IV COLUMNS
-# -------------------------------------------------
-def clean_iv_col(col):
-    """Convert to float, fill NaN/None/invalid with 0.0, round to 1 decimal"""
-    return pd.to_numeric(col, errors='coerce').fillna(0.0).round(1)
+# ================================================
+# SUPPRESS ALL WARNINGS
+# ================================================
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
-
-# -------------------------------------------------
-# BLACK-SCHOLES GREEKS
-# -------------------------------------------------
-def black_scholes_greeks(S, K, T, r, sigma, option_type="call"):
-    if T <= 0 or sigma <= 0:
-        return {"delta": 0, "gamma": 0, "theta": 0, "vega": 0, "rho": 0}
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    if option_type == "call":
-        delta = norm.cdf(d1)
-        gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
-        theta = (-S * norm.pdf(d1) * sigma / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
-        vega = S * norm.pdf(d1) * np.sqrt(T) / 100
-        rho = K * T * np.exp(-r * T) * norm.cdf(d2) / 100
-    else:
-        delta = norm.cdf(d1) - 1
-        gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
-        theta = (-S * norm.pdf(d1) * sigma / (2 * np.sqrt(T)) + r * K * np.exp(-r * T) * norm.cdf(-d2)) / 365
-        vega = S * norm.pdf(d1) * np.sqrt(T) / 100
-        rho = -K * T * np.exp(-r * T) * norm.cdf(-d2) / 100
-    return {k: round(v, 4) for k, v in locals().items() if k in ["delta", "gamma", "theta", "vega", "rho"]}
-
-
-# -------------------------------------------------
-# CONFIG
-# -------------------------------------------------
+# ================================================
+# CONFIG & DIRECTORIES
+# ================================================
 PARQUET_FILE = "optionable_full.parquet"
 HISTORY_CACHE_DIR = "history_cache"
 OPTION_CHAIN_CACHE_DIR = "option_chain_cache"
 IV_HISTORY_CACHE_DIR = "iv_history_cache"
+EARNINGS_CACHE_DIR = "earnings_cache"
+
 CBOE_URL = "https://cdn.cboe.com/data/us/options/market_statistics/symbol_reference/exo-underlying.csv"
-SCHEMA_VERSION = "20.4"
+SCHEMA_VERSION = "20.18"
 
 SYMBOLS_TTL = 24 * 3600
 HISTORY_TTL = 24 * 3600
 OPTION_CHAIN_TTL = 6 * 3600
 IV_HISTORY_TTL = 24 * 3600
+EARNINGS_TTL = 12 * 3600
 
 CPU_COUNT = psutil.cpu_count(logical=False) or 4
 MAX_WORKERS = min(CPU_COUNT, 8)
 INITIAL_BATCH_SIZE = min(CPU_COUNT * 20, 200)
 
-os.makedirs(HISTORY_CACHE_DIR, exist_ok=True)
-os.makedirs(OPTION_CHAIN_CACHE_DIR, exist_ok=True)
-os.makedirs(IV_HISTORY_CACHE_DIR, exist_ok=True)
+for d in [HISTORY_CACHE_DIR, OPTION_CHAIN_CACHE_DIR, IV_HISTORY_CACHE_DIR, EARNINGS_CACHE_DIR]:
+    os.makedirs(d, exist_ok=True)
 
+# Vietnam Time (GMT+7)
+VN_TZ = timezone(timedelta(hours=7))
+NOW_VN = datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M VN")
 
-# -------------------------------------------------
-# DAILY REFRESH HELPERS
-# -------------------------------------------------
+# ================================================
+# UTILITIES
+# ================================================
+def clean_iv_col(col):
+    return pd.to_numeric(col, errors='coerce').fillna(0.0).round(1)
+
 def _utc_today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
@@ -13746,40 +13724,76 @@ def _last_refresh_date(parquet_path: str) -> str | None:
     try:
         df = pd.read_parquet(parquet_path, columns=["updated_at"])
         return pd.to_datetime(df["updated_at"].iloc[0]).date().isoformat()
-    except Exception:
+    except:
         return None
 
 def _purge_stale_cache():
     now = time.time()
-    for dir_path, ttl in [(HISTORY_CACHE_DIR, HISTORY_TTL), (OPTION_CHAIN_CACHE_DIR, OPTION_CHAIN_TTL), (IV_HISTORY_CACHE_DIR, IV_HISTORY_TTL)]:
+    for dir_path, ttl in [
+        (HISTORY_CACHE_DIR, HISTORY_TTL),
+        (OPTION_CHAIN_CACHE_DIR, OPTION_CHAIN_TTL),
+        (IV_HISTORY_CACHE_DIR, IV_HISTORY_TTL),
+        (EARNINGS_CACHE_DIR, EARNINGS_TTL)
+    ]:
         for filename in os.listdir(dir_path):
             path = os.path.join(dir_path, filename)
             if os.path.getmtime(path) < now - ttl:
                 os.remove(path)
 
 
-# -------------------------------------------------
-# YFINANCE SILENCER
-# -------------------------------------------------
-class YFinanceFilter:
-    def __enter__(self):
-        self.original_filters = warnings.filters[:]
-        warnings.filterwarnings("ignore", category=UserWarning, module="yfinance")
-        return self
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        warnings.filters = self.original_filters
+# ================================================
+# YFINANCE LIVE PRICE
+# ================================================
+def get_live_price(symbol: str) -> float:
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
+        return info.get("regularMarketPrice") or info.get("previousClose") or np.nan
+    except:
+        return np.nan
 
-def yf_safe_history(symbol: str, **kwargs):
-    with YFinanceFilter():
-        try:
-            return yf.Ticker(symbol).history(**kwargs)
-        except Exception:
-            return pd.DataFrame()
+def get_last_close(symbol: str) -> float:
+    cached = get_cached_history(symbol)
+    if cached is not None and not cached.empty:
+        return cached["Close"].iloc[-1]
+    return get_live_price(symbol)
 
 
-# -------------------------------------------------
+# ================================================
+# BLACK-SCHOLES GREEKS (FORCE ALL 5)
+# ================================================
+def black_scholes_greeks(S, K, T, r, sigma, option_type="call"):
+    greek_keys = ["delta", "gamma", "theta", "vega", "rho"]
+    result = {k: 0.0 for k in greek_keys}
+    
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return result
+
+    try:
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+
+        if option_type == "call":
+            result["delta"] = norm.cdf(d1)
+            result["gamma"] = norm.pdf(d1) / (S * sigma * np.sqrt(T))
+            result["theta"] = (-S * norm.pdf(d1) * sigma / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
+            result["vega"] = S * norm.pdf(d1) * np.sqrt(T) / 100
+            result["rho"] = K * T * np.exp(-r * T) * norm.cdf(d2) / 100
+        else:
+            result["delta"] = norm.cdf(d1) - 1
+            result["gamma"] = norm.pdf(d1) / (S * sigma * np.sqrt(T))
+            result["theta"] = (-S * norm.pdf(d1) * sigma / (2 * np.sqrt(T)) + r * K * np.exp(-r * T) * norm.cdf(-d2)) / 365
+            result["vega"] = S * norm.pdf(d1) * np.sqrt(T) / 100
+            result["rho"] = -K * T * np.exp(-r * T) * norm.cdf(-d2) / 100
+    except:
+        pass
+
+    return {k: round(v, 4) for k, v in result.items()}
+
+
+# ================================================
 # ADAPTIVE TUNER
-# -------------------------------------------------
+# ================================================
 class Tuner:
     def __init__(self):
         self.rate_limited = 0
@@ -13808,9 +13822,9 @@ class Tuner:
 tuner = Tuner()
 
 
-# -------------------------------------------------
-# CACHE LAYER
-# -------------------------------------------------
+# ================================================
+# HISTORY CACHE
+# ================================================
 def get_cached_history(symbol: str) -> pd.DataFrame | None:
     path = os.path.join(HISTORY_CACHE_DIR, f"{symbol}.parquet")
     if not os.path.exists(path):
@@ -13830,17 +13844,80 @@ def cache_history(symbol: str, df: pd.DataFrame):
     path = os.path.join(HISTORY_CACHE_DIR, f"{symbol}.parquet")
     try:
         df.to_parquet(path, index=False)
-    except Exception:
+    except:
         pass
 
-def get_last_close(symbol: str) -> float:
-    cached = get_cached_history(symbol)
-    return cached["Close"].iloc[-1] if cached is not None and not cached.empty else np.nan
+
+# ================================================
+# EARNINGS CACHE
+# ================================================
+def get_earnings_date(symbol: str) -> datetime | None:
+    path = os.path.join(EARNINGS_CACHE_DIR, f"{symbol}.txt")
+    if os.path.exists(path) and time.time() - os.path.getmtime(path) < EARNINGS_TTL:
+        try:
+            dt = datetime.fromisoformat(open(path).read().strip())
+            if dt > datetime.now():
+                return dt
+        except:
+            pass
+
+    try:
+        ticker = yf.Ticker(symbol)
+        cal = ticker.calendar
+        if not cal.empty and "Earnings Date" in cal.columns:
+            dt = cal["Earnings Date"].iloc[0]
+            if pd.notna(dt):
+                dt = pd.to_datetime(dt)
+                if isinstance(dt, pd.DatetimeIndex):
+                    dt = dt[0]
+                if dt > datetime.now():
+                    with open(path, "w") as f:
+                        f.write(dt.isoformat())
+                    return dt
+    except:
+        pass
+    return None
 
 
-# -------------------------------------------------
-# IV HISTORY CACHE
-# -------------------------------------------------
+# ================================================
+# IV vs HV (30-day)
+# ================================================
+def compute_hv30(symbol: str) -> float:
+    hist = get_cached_history(symbol)
+    if hist is None or len(hist) < 30:
+        return np.nan
+    returns = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
+    if len(returns) < 20:
+        return np.nan
+    hv = returns[-30:].std() * np.sqrt(252) * 100
+    return round(hv, 1)
+
+
+# ================================================
+# CURRENT ATM IV
+# ================================================
+def get_current_atm_iv(symbol: str) -> float:
+    try:
+        ticker = yf.Ticker(symbol)
+        expirations = ticker.options
+        if not expirations:
+            return np.nan
+        chain = ticker.option_chain(expirations[0])
+        S = get_last_close(symbol)
+        if np.isnan(S):
+            return np.nan
+        atm_call = chain.calls.iloc[(chain.calls["strike"] - S).abs().argsort()[:1]]
+        atm_put = chain.puts.iloc[(chain.puts["strike"] - S).abs().argsort()[:1]]
+        iv_c = atm_call["impliedVolatility"].iloc[0] if not atm_call.empty else np.nan
+        iv_p = atm_put["impliedVolatility"].iloc[0] if not atm_put.empty else np.nan
+        return np.nanmean([iv_c, iv_p])
+    except:
+        return np.nan
+
+
+# ================================================
+# IV HISTORY + RANK
+# ================================================
 def get_cached_iv_history(symbol: str) -> pd.DataFrame | None:
     path = os.path.join(IV_HISTORY_CACHE_DIR, f"{symbol}.parquet")
     if not os.path.exists(path):
@@ -13851,7 +13928,7 @@ def get_cached_iv_history(symbol: str) -> pd.DataFrame | None:
             os.remove(path)
             return None
         return df
-    except Exception:
+    except:
         if os.path.exists(path):
             os.remove(path)
         return None
@@ -13860,7 +13937,7 @@ def cache_iv_history(symbol: str, df: pd.DataFrame):
     path = os.path.join(IV_HISTORY_CACHE_DIR, f"{symbol}.parquet")
     try:
         df.to_parquet(path, index=False)
-    except Exception:
+    except:
         pass
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
@@ -13894,12 +13971,10 @@ def fetch_iv_history(symbol: str) -> pd.DataFrame:
         if not ivs:
             return pd.DataFrame()
 
-        df = pd.DataFrame(ivs)
-        df = df.dropna().sort_values("date")
+        df = pd.DataFrame(ivs).dropna().sort_values("date")
         cache_iv_history(symbol, df)
-        time.sleep(0.1)
         return df
-    except Exception:
+    except:
         return pd.DataFrame()
 
 def compute_iv_rank_percentile(symbol: str, current_iv: float) -> dict:
@@ -13915,9 +13990,9 @@ def compute_iv_rank_percentile(symbol: str, current_iv: float) -> dict:
     return {"iv_rank": round(iv_rank, 1), "iv_percentile": round(iv_percentile, 1)}
 
 
-# -------------------------------------------------
-# FULL OPTION CHAIN WITH ALL FILTERS
-# -------------------------------------------------
+# ================================================
+# OPTION CHAIN CACHE
+# ================================================
 def get_cached_option_chain(symbol: str, contract_type: str) -> pd.DataFrame | None:
     path = os.path.join(OPTION_CHAIN_CACHE_DIR, f"{symbol}_{contract_type}.parquet")
     if not os.path.exists(path):
@@ -13925,6 +14000,10 @@ def get_cached_option_chain(symbol: str, contract_type: str) -> pd.DataFrame | N
     try:
         df = pd.read_parquet(path)
         if time.time() - os.path.getmtime(path) > OPTION_CHAIN_TTL:
+            os.remove(path)
+            return None
+        required_greeks = ["delta", "gamma", "theta", "vega", "rho"]
+        if not all(col in df.columns for col in required_greeks):
             os.remove(path)
             return None
         return df
@@ -13937,9 +14016,13 @@ def cache_option_chain(symbol: str, contract_type: str, df: pd.DataFrame):
     path = os.path.join(OPTION_CHAIN_CACHE_DIR, f"{symbol}_{contract_type}.parquet")
     try:
         df.to_parquet(path, index=False)
-    except Exception:
+    except:
         pass
 
+
+# ================================================
+# FULL OPTION CHAIN WITH GREEKS + IV/HV
+# ================================================
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
 def fetch_full_option_chain_with_greeks_iv(
     symbol: str, contract_type: str,
@@ -13965,10 +14048,18 @@ def fetch_full_option_chain_with_greeks_iv(
             mask &= (cached["strike"] >= strike_lower) & (cached["strike"] <= strike_upper)
         filtered = cached[mask].copy()
         if not filtered.empty:
-            current_iv = filtered["impliedVolatility"].mean()
+            current_iv = get_current_atm_iv(symbol)
+            if np.isnan(current_iv):
+                current_iv = filtered["impliedVolatility"].mean()
             iv_stats = compute_iv_rank_percentile(symbol, current_iv)
             filtered["iv_rank"] = iv_stats.get("iv_rank", 0.0)
             filtered["iv_percentile"] = iv_stats.get("iv_percentile", 0.0)
+            filtered["hv30"] = compute_hv30(symbol)
+            filtered["iv_hv_ratio"] = np.where(
+                filtered["hv30"] > 0,
+                (filtered["impliedVolatility"] * 100 / filtered["hv30"]).round(2),
+                np.nan
+            )
         return filtered
 
     try:
@@ -14004,7 +14095,6 @@ def fetch_full_option_chain_with_greeks_iv(
                 df["symbol"] = symbol
                 df["contract_type"] = contract_type
 
-                # Compute Greeks
                 greeks = []
                 for _, row in df.iterrows():
                     K = row["strike"]
@@ -14012,15 +14102,6 @@ def fetch_full_option_chain_with_greeks_iv(
                     g = black_scholes_greeks(S, K, T, r, sigma, contract_type)
                     greeks.append(g)
                 gdf = pd.DataFrame(greeks)
-
-                # FORCE ALL 5 GREEKS
-                required_greeks = ["delta", "gamma", "theta", "vega", "rho"]
-                for col in required_greeks:
-                    if col not in gdf.columns:
-                        gdf[col] = 0.0
-                    else:
-                        gdf[col] = gdf[col].fillna(0.0).round(4)
-                gdf = gdf[required_greeks]
 
                 df = pd.concat([df.reset_index(drop=True), gdf], axis=1)
                 df["days_to_exp"] = dte
@@ -14033,7 +14114,6 @@ def fetch_full_option_chain_with_greeks_iv(
 
         full_df = pd.concat(chains, ignore_index=True)
 
-        # Apply all filters
         mask = (
             (full_df["impliedVolatility"] * 100 >= min_iv) &
             (full_df["impliedVolatility"] * 100 <= max_iv) &
@@ -14048,15 +14128,29 @@ def fetch_full_option_chain_with_greeks_iv(
         full_df = full_df[mask].copy()
 
         if not full_df.empty:
-            current_iv = full_df["impliedVolatility"].mean()
+            current_iv = get_current_atm_iv(symbol)
+            if np.isnan(current_iv):
+                current_iv = full_df["impliedVolatility"].mean()
             iv_stats = compute_iv_rank_percentile(symbol, current_iv)
             full_df["iv_rank"] = iv_stats.get("iv_rank", 0.0)
             full_df["iv_percentile"] = iv_stats.get("iv_percentile", 0.0)
+            full_df["hv30"] = compute_hv30(symbol)
+            full_df["iv_hv_ratio"] = np.where(
+                full_df["hv30"] > 0,
+                (full_df["impliedVolatility"] * 100 / full_df["hv30"]).round(2),
+                np.nan
+            )
 
-        cols = ['symbol', 'contractSymbol', 'strike', 'lastPrice', 'bid', 'ask', 'volume', 'openInterest',
-                'impliedVolatility', 'inTheMoney', 'expiration', 'contract_type', 'days_to_exp',
-                'delta', 'gamma', 'theta', 'vega', 'rho', 'iv_rank', 'iv_percentile']
-        full_df = full_df[[c for c in cols if c in full_df.columns]]
+        cols = [
+            'symbol', 'contractSymbol', 'strike', 'lastPrice', 'bid', 'ask', 'volume', 'openInterest',
+            'impliedVolatility', 'inTheMoney', 'expiration', 'contract_type', 'days_to_exp',
+            'delta', 'gamma', 'theta', 'vega', 'rho',
+            'iv_rank', 'iv_percentile', 'hv30', 'iv_hv_ratio'
+        ]
+        for col in cols:
+            if col not in full_df.columns:
+                full_df[col] = 0.0 if col in ["delta", "gamma", "theta", "vega", "rho"] else np.nan
+        full_df = full_df[cols]
 
         cache_option_chain(symbol, contract_type, full_df)
         time.sleep(0.1)
@@ -14068,9 +14162,9 @@ def fetch_full_option_chain_with_greeks_iv(
         return pd.DataFrame()
 
 
-# -------------------------------------------------
+# ================================================
 # CBOE SYMBOLS
-# -------------------------------------------------
+# ================================================
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=30))
 def fetch_cboe_symbols() -> pd.DataFrame:
     r = requests.get(CBOE_URL, timeout=30)
@@ -14097,14 +14191,10 @@ def update_symbols() -> pd.DataFrame:
     return pd.read_parquet(PARQUET_FILE)
 
 
-# -------------------------------------------------
-# YFINANCE HISTORICAL DATA
-# -------------------------------------------------
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=2, min=30, max=120),
-    retry=retry_if_exception_type((requests.RequestException, ValueError)),
-)
+# ================================================
+# HISTORICAL DATA FETCH
+# ================================================
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=30, max=120))
 def fetch_historical_data(symbol: str) -> pd.DataFrame | None:
     cached = get_cached_history(symbol)
     if cached is not None:
@@ -14115,7 +14205,7 @@ def fetch_historical_data(symbol: str) -> pd.DataFrame | None:
         time.sleep(60)
 
     try:
-        data = yf_safe_history(symbol, period="6mo", interval="1d", raise_errors=True, timeout=15)
+        data = yf.Ticker(symbol).history(period="6mo", interval="1d", raise_errors=True, timeout=15)
         if data.empty:
             return None
         data = data.reset_index()
@@ -14130,9 +14220,9 @@ def fetch_historical_data(symbol: str) -> pd.DataFrame | None:
         return None
 
 
-# -------------------------------------------------
+# ================================================
 # VECTORIZED INDICATORS
-# -------------------------------------------------
+# ================================================
 def compute_indicators_vectorized(df: pd.DataFrame, inds: list, params: dict) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
@@ -14193,9 +14283,9 @@ def compute_indicators_vectorized(df: pd.DataFrame, inds: list, params: dict) ->
     return last
 
 
-# -------------------------------------------------
+# ================================================
 # BATCH PROCESSOR
-# -------------------------------------------------
+# ================================================
 def process_batch(symbols: list, min_vol: int, min_price: float, inds: list, params: dict) -> pd.DataFrame:
     data_frames = []
     for sym in symbols:
@@ -14216,9 +14306,9 @@ def process_batch(symbols: list, min_vol: int, min_price: float, inds: list, par
     return compute_indicators_vectorized(df, inds, params)
 
 
-# -------------------------------------------------
+# ================================================
 # PARALLEL DRIVER
-# -------------------------------------------------
+# ================================================
 def compute_parallel(symbols: list, min_vol: int, min_price: float, inds: list, params: dict) -> pd.DataFrame:
     batch_size = tuner.batch_size
     batches = [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
@@ -14236,9 +14326,9 @@ def compute_parallel(symbols: list, min_vol: int, min_price: float, inds: list, 
     return pd.concat(results, ignore_index=True) if results else pd.DataFrame()
 
 
-# -------------------------------------------------
+# ================================================
 # CLASSIFIER
-# -------------------------------------------------
+# ================================================
 def classify_bull_bear(df: pd.DataFrame, inds: list, rsi_bull: float, rsi_bear: float):
     if df.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -14270,9 +14360,9 @@ def classify_bull_bear(df: pd.DataFrame, inds: list, rsi_bull: float, rsi_bear: 
     return df[bull_mask].copy(), df[bear_mask].copy(), df[neutral_mask].copy()
 
 
-# -------------------------------------------------
-# FULL OPTION CHAIN AGGREGATOR
-# -------------------------------------------------
+# ================================================
+# OPTION CHAIN AGGREGATOR
+# ================================================
 def fetch_all_option_chains_with_greeks_iv(
     symbols: list, contract_type: str,
     min_dte: int, max_dte: int,
@@ -14298,9 +14388,9 @@ def fetch_all_option_chains_with_greeks_iv(
     return pd.concat(chains, ignore_index=True) if chains else pd.DataFrame()
 
 
-# -------------------------------------------------
+# ================================================
 # INTERACTIVE CHART
-# -------------------------------------------------
+# ================================================
 def plot_interactive_chart(symbol: str, inds: list, params: dict, bull_df, bear_df):
     hist = fetch_historical_data(symbol)
     if hist is None or hist.empty:
@@ -14389,13 +14479,85 @@ def plot_interactive_chart(symbol: str, inds: list, params: dict, bull_df, bear_
     st.plotly_chart(fig, use_container_width=True)
 
 
-# -------------------------------------------------
+# ================================================
+# SAFE CHAIN DISPLAY FUNCTION
+# ================================================
+def display_option_chain(chain: pd.DataFrame, contract_type: str):
+    if chain.empty:
+        st.info(f"No {contract_type.upper()} options found.")
+        return
+
+    # === FORCE DataFrame ===
+    if isinstance(chain, pd.Series):
+        chain = pd.DataFrame([chain])
+    elif not isinstance(chain, pd.DataFrame):
+        chain = pd.DataFrame()
+    chain = chain.copy().reset_index(drop=True)
+
+    # === ENSURE COLUMNS ===
+    required = ["symbol", "strike", "lastPrice", "bid", "ask", "volume", "openInterest",
+                "impliedVolatility", "inTheMoney", "expiration", "days_to_exp"]
+    for col in required:
+        if col not in chain.columns:
+            chain[col] = np.nan if col not in ["inTheMoney"] else False
+
+    greek_cols = ["delta", "gamma", "theta", "vega", "rho", "iv_rank", "iv_percentile", "iv_hv_ratio"]
+    for col in greek_cols:
+        if col not in chain.columns:
+            chain[col] = 0.0 if col in ["delta", "gamma", "theta", "vega", "rho"] else np.nan
+
+    # === BUILD DISPLAY ===
+    display = chain.copy()
+    display["IV"] = (pd.to_numeric(display["impliedVolatility"], errors='coerce') * 100).round(2).astype(str) + "%"
+    display["Rank"] = clean_iv_col(display["iv_rank"]).astype(str) + "%"
+    display["Pct"] = clean_iv_col(display["iv_percentile"]).astype(str) + "%"
+    display["IV/HV"] = display["iv_hv_ratio"].fillna("-").astype(str)
+
+    final_cols = [
+        "symbol", "expiration", "days_to_exp", "strike", "lastPrice", "bid", "ask",
+        "IV", "Rank", "Pct", "IV/HV", "volume", "openInterest", "inTheMoney",
+        "delta", "gamma", "theta", "vega", "rho"
+    ]
+    display = display.reindex(columns=final_cols).fillna(0.0)
+
+    # === STYLING ===
+    def highlight_rank(val):
+        try:
+            v = float(str(val).rstrip('%'))
+            return "background-color: #ffcccc; font-weight: bold" if v >= 80 else \
+                   "background-color: #ccffcc; font-weight: bold" if v <= 20 else ""
+        except:
+            return ""
+
+    styled = (
+        display.style
+        .map(highlight_rank, subset=["Rank"])
+        .applymap(lambda x: "font-weight: bold", subset=pd.IndexSlice[:, ["symbol", "strike"]])
+        .format({
+            "lastPrice": "{:.4f}", "bid": "{:.4f}", "ask": "{:.4f}",
+            "delta": "{:.4f}", "gamma": "{:.4f}", "theta": "{:.4f}",
+            "vega": "{:.4f}", "rho": "{:.4f}",
+            "volume": "{:,.0f}", "openInterest": "{:,.0f}"
+        })
+    )
+
+    st.subheader(f"{contract_type.upper()} Option Chain + ALL 5 GREEKS + IV/HV")
+    st.dataframe(styled, use_container_width=True)
+    st.download_button(
+        f"Download {contract_type.upper()} Chain",
+        chain.to_csv(index=False).encode(),
+        f"{contract_type}_chain.csv",
+        "text/csv"
+    )
+
+
+# ================================================
 # MAIN UI
-# -------------------------------------------------
+# ================================================
 def main():
-    st.set_page_config(page_title="CBOE Screener + Full Filters", layout="wide")
+    st.set_page_config(page_title="CBOE Screener + IV/HV + Greeks", layout="wide")
     st.title("CBOE Optionable Stock Screener (Reversed Logic)")
-    st.caption("**'Bullish' = Likely DOWN → PUTs** | **'Bearish' = Likely UP → CALLs**")
+    st.caption(f"**'Bullish' = Likely DOWN → PUTs** | **'Bearish' = Likely UP → CALLs** | **IV Rank = ATM** | **Time: {NOW_VN}**")
 
     with st.spinner("Refreshing CBOE symbols..."):
         sym_df = update_symbols()
@@ -14404,7 +14566,13 @@ def main():
 
     _purge_stale_cache()
 
-    # === 1. TECHNICAL INDICATORS FIRST ===
+    # === SIDEBAR: Earnings Filter ===
+    with st.sidebar:
+        st.markdown("### Earnings Filter")
+        avoid_earnings_days = st.slider("Avoid earnings in next X days", 0, 7, 0, key="avoid_earnings")
+        st.session_state.avoid_earnings_days = avoid_earnings_days
+
+    # === 1. INDICATORS ===
     st.markdown("### 1. Select Technical Indicators")
     all_inds = ["RSI", "SMA", "Bollinger Bands (BB)", "MACD", "Support/Resistance"]
     selected = st.multiselect("Choose Indicators", all_inds, default=[])
@@ -14418,9 +14586,9 @@ def main():
                 p = st.slider("Period", 5, 50, 14, key="rsi_p")
                 col_a, col_b = st.columns(2)
                 with col_a:
-                    rsi_bull = st.number_input("Bullish RSI <", 0, 100, 30, key="input_rsi_bull")
+                    rsi_bull = st.number_input("Bullish RSI <", 0, 100, 30, key="rsi_bull")
                 with col_b:
-                    rsi_bear = st.number_input("Bearish RSI >", 0, 100, 70, key="input_rsi_bear")
+                    rsi_bear = st.number_input("Bearish RSI >", 0, 100, 70, key="rsi_bear")
                 params[i] = {"period": p}
             elif i == "SMA":
                 params[i] = {"period": st.slider("Period", 10, 200, 50, key="sma_p")}
@@ -14438,42 +14606,34 @@ def main():
                 tol = st.slider("Tolerance (%)", 0.0, 10.0, 2.0, 0.1, key="sr_tol") / 100
                 params[i] = {"lookback": lb, "tolerance": tol}
 
-    # === 2. OPTION CHAIN FILTERS ===
-    st.markdown("### 2. Option Chain Filters (Applied After Scan)")
-
-    col_dte = st.columns([1, 1])
-    with col_dte[0]:
-        dte_range = st.slider("Days to Expiration (DTE)", 0, 365, (0, 90), step=1, key="dte_slider")
+    # === 2. OPTION FILTERS ===
+    st.markdown("### 2. Option Chain Filters")
+    col_dte, col_iv = st.columns(2)
+    with col_dte:
+        dte_range = st.slider("Days to Expiration (DTE)", 0, 365, (0, 90), key="dte")
         min_dte, max_dte = dte_range
-    with col_dte[1]:
-        iv_range = st.slider("Implied Volatility (IV %)", 0, 300, (10, 100), step=1, key="iv_slider")
+    with col_iv:
+        iv_range = st.slider("Implied Volatility (IV %)", 0, 300, (10, 100), key="iv")
         min_iv, max_iv = iv_range
 
-    col_strike = st.columns([1, 1])
-    with col_strike[0]:
-        strike_range = st.slider("Strike % from Current Price", 50, 200, (80, 120), step=1, key="strike_slider")
+    col_strike, col_vol = st.columns(2)
+    with col_strike:
+        strike_range = st.slider("Strike % from Price", 50, 200, (80, 120), key="strike")
         min_strike_pct, max_strike_pct = strike_range
-    with col_strike[1]:
-        col_vol, col_oi = st.columns(2)
-        with col_vol:
-            min_volume = st.slider("Min Volume", 0, 1000, 10, 1, key="vol_slider")
+    with col_vol:
+        col_v, col_oi = st.columns(2)
+        with col_v:
+            min_volume = st.slider("Min Volume", 0, 1000, 10, key="vol")
         with col_oi:
-            min_oi = st.slider("Min Open Interest", 0, 5000, 50, 5, key="oi_slider")
+            min_oi = st.slider("Min Open Interest", 0, 5000, 50, key="oi")
 
-    st.caption(
-        f"**DTE**: {min_dte}–{max_dte} | "
-        f"**IV**: {min_iv}%–{max_iv}% | "
-        f"**Strike**: {min_strike_pct}%–{max_strike_pct}% | "
-        f"**Vol ≥ {min_volume}**, **OI ≥ {min_oi}**"
-    )
-
-    # === 3. STOCK FILTERS & SCAN ===
+    # === 3. STOCK FILTERS ===
     col1, col2 = st.columns(2)
     with col1:
         min_vol = st.number_input("Min Avg Daily Volume", 100_000, 5_000_000, 500_000, 50_000)
-        min_price = st.number_input("Min Current Price ($)", 0.0, 1000.0, 50.0, 0.5)
+        min_price = st.number_input("Min Price ($)", 0.0, 1000.0, 50.0, 0.5)
     with col2:
-        dry_run = st.checkbox("Dry Run (first 30 symbols)", value=True)
+        dry_run = st.checkbox("Dry Run (first 30)", value=True)
 
     symbols = sym_df["symbol"].dropna().unique().tolist()
     if dry_run:
@@ -14492,8 +14652,20 @@ def main():
 
         if df.empty:
             st.warning("No valid stocks after scan.")
-            return
+            st.stop()
 
+        # Earnings Filter
+        if st.session_state.avoid_earnings_days > 0:
+            with st.spinner("Applying earnings filter..."):
+                def has_earnings(sym):
+                    dt = get_earnings_date(sym)
+                    return dt and (dt - datetime.now()).days <= st.session_state.avoid_earnings_days
+                earnings_syms = [s for s in df["symbol"] if has_earnings(s)]
+                df = df[~df["symbol"].isin(earnings_syms)]
+                if earnings_syms:
+                    st.toast(f"Excluded {len(earnings_syms)} stocks with earnings in {st.session_state.avoid_earnings_days} days")
+
+        # Finalize
         for sym in df["symbol"]:
             fetch_historical_data(sym)
 
@@ -14510,6 +14682,7 @@ def main():
         bull_df, bear_df, neutral_df = classify_bull_bear(df, selected, rsi_bull, rsi_bear)
 
         st.success(f"**Scan done in {elapsed_scan:.1f}s** – {len(df)} valid | **{len(bull_df)} Bullish** | **{len(bear_df)} Bearish**")
+        st.toast(f"Scan complete: {len(bull_df)} PUT signals | {len(bear_df)} CALL signals")
 
         start_chain = time.time()
         with st.spinner("Fetching PUT chains..."):
@@ -14535,7 +14708,9 @@ def main():
             "bull_chain": bull_chain, "bear_chain": bear_chain
         })
 
-    # === RESULTS ===
+    # ================================================
+    # RESULTS
+    # ================================================
     if 'bull_df' in st.session_state:
         st.markdown("---")
         st.subheader("Results")
@@ -14543,19 +14718,14 @@ def main():
         base_cols = ["symbol", "Close", "Change %", "Avg Volume"]
         indicator_cols = []
         for ind in st.session_state.inds:
-            if ind == "RSI" and "RSI" in st.session_state.bull_df.columns:
-                indicator_cols.append("RSI")
-            elif ind == "SMA" and "SMA" in st.session_state.bull_df.columns:
-                indicator_cols.append("SMA")
-            elif ind == "Bollinger Bands (BB)" and "BB_Mid" in st.session_state.bull_df.columns:
-                indicator_cols.extend(["BB_Lower", "BB_Mid", "BB_Upper"])
-            elif ind == "MACD" and "MACD" in st.session_state.bull_df.columns:
-                indicator_cols.extend(["MACD", "Signal", "Hist"])
-            elif ind == "Support/Resistance" and "Support" in st.session_state.bull_df.columns:
-                indicator_cols.extend(["Support", "Resistance"])
+            if ind == "RSI": indicator_cols.append("RSI")
+            elif ind == "SMA": indicator_cols.append("SMA")
+            elif ind == "Bollinger Bands (BB)": indicator_cols.extend(["BB_Lower", "BB_Mid", "BB_Upper"])
+            elif ind == "MACD": indicator_cols.extend(["MACD", "Signal", "Hist"])
+            elif ind == "Support/Resistance": indicator_cols.extend(["Support", "Resistance"])
         display_cols = base_cols + indicator_cols
 
-        # === BULLISH (PUT CHAIN) ===
+        # ---- BULLISH (PUTs) ----
         with st.expander("Bullish Trade Signals (Likely DOWN → PUTs + IV Rank)", expanded=True):
             if st.session_state.bull_df.empty:
                 st.info("No Bullish signals.")
@@ -14563,25 +14733,9 @@ def main():
                 valid = [c for c in display_cols if c in st.session_state.bull_df.columns]
                 st.dataframe(st.session_state.bull_df[valid].round(2).sort_values("Change %", ascending=True), use_container_width=True)
 
-            chain = st.session_state.get("bull_chain", pd.DataFrame())
-            if not chain.empty:
-                st.subheader("PUT Option Chain + ALL GREEKS")
-                display = chain.copy()
-                display["IV"] = (display["impliedVolatility"] * 100).round(2).astype(str) + "%"
+            display_option_chain(st.session_state.get("bull_chain", pd.DataFrame()), "put")
 
-                # BULLETPROOF IV RANK & PERCENTILE
-                display["Rank"] = clean_iv_col(display["iv_rank"]).astype(str) + "%"
-                display["Pct"]  = clean_iv_col(display["iv_percentile"]).astype(str) + "%"
-
-                safe_cols = ["symbol", "expiration", "days_to_exp", "strike", "lastPrice", "bid", "ask", "IV", "Rank", "Pct", "volume", "openInterest", "inTheMoney"]
-                greek_cols = ["delta", "gamma", "theta", "vega", "rho"]
-                final_cols = safe_cols + [c for c in greek_cols if c in chain.columns]
-
-                st.dataframe(display[final_cols].round(4), use_container_width=True)
-                csv = chain.to_csv(index=False).encode()
-                st.download_button("Download PUT Chain + All Greeks", csv, "bullish_put_greeks.csv", "text/csv")
-
-        # === BEARISH (CALL CHAIN) ===
+        # ---- BEARISH (CALLs) ----
         with st.expander("Bearish Trade Signals (Likely UP → CALLs + IV Rank)", expanded=True):
             if st.session_state.bear_df.empty:
                 st.info("No Bearish signals.")
@@ -14589,25 +14743,9 @@ def main():
                 valid = [c for c in display_cols if c in st.session_state.bear_df.columns]
                 st.dataframe(st.session_state.bear_df[valid].round(2).sort_values("Change %", ascending=False), use_container_width=True)
 
-            chain = st.session_state.get("bear_chain", pd.DataFrame())
-            if not chain.empty:
-                st.subheader("CALL Option Chain + ALL GREEKS")
-                display = chain.copy()
-                display["IV"] = (display["impliedVolatility"] * 100).round(2).astype(str) + "%"
+            display_option_chain(st.session_state.get("bear_chain", pd.DataFrame()), "call")
 
-                # BULLETPROOF IV RANK & PERCENTILE
-                display["Rank"] = clean_iv_col(display["iv_rank"]).astype(str) + "%"
-                display["Pct"]  = clean_iv_col(display["iv_percentile"]).astype(str) + "%"
-
-                safe_cols = ["symbol", "expiration", "days_to_exp", "strike", "lastPrice", "bid", "ask", "IV", "Rank", "Pct", "volume", "openInterest", "inTheMoney"]
-                greek_cols = ["delta", "gamma", "theta", "vega", "rho"]
-                final_cols = safe_cols + [c for c in greek_cols if c in chain.columns]
-
-                st.dataframe(display[final_cols].round(4), use_container_width=True)
-                csv = chain.to_csv(index=False).encode()
-                st.download_button("Download CALL Chain + All Greeks", csv, "bearish_call_greeks.csv", "text/csv")
-
-        # === CHART ===
+        # ---- CHART ----
         st.markdown("---")
         st.subheader("Interactive Chart Viewer")
         col_a, col_b, col_c = st.columns(3)
@@ -14623,16 +14761,16 @@ def main():
             with st.spinner("Loading chart..."):
                 plot_interactive_chart(selected_sym, st.session_state.inds, st.session_state.params, st.session_state.bull_df, st.session_state.bear_df)
 
-    st.caption(f"Data as of: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} | Last CBOE refresh: {last_sym_update}")
+    st.caption(f"**Data as of: {NOW_VN}** | Last CBOE refresh: {last_sym_update} UTC")
 
     if st.button("Clear Cache"):
-        for d in [HISTORY_CACHE_DIR, OPTION_CHAIN_CACHE_DIR, IV_HISTORY_CACHE_DIR]:
+        for d in [HISTORY_CACHE_DIR, OPTION_CHAIN_CACHE_DIR, IV_HISTORY_CACHE_DIR, EARNINGS_CACHE_DIR]:
             if os.path.exists(d):
                 shutil.rmtree(d)
                 os.makedirs(d, exist_ok=True)
         if os.path.exists(PARQUET_FILE):
             os.remove(PARQUET_FILE)
-        st.success("Cache cleared!")
+        st.success("Cache cleared! App will refresh on next run.")
         st.rerun()
 
 
